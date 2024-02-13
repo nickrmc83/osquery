@@ -346,7 +346,7 @@ static std::string rocksDBStatusString(const rocksdb::Status &status) {
     // See https://github.com/rockset/rocksdb-cloud/blob/40f265a20e0f2773c6cc3db0b75666969292fa96/include/rocksdb/status.h
     // for a list of code, sub-codes and severities.
     std::ostringstream builder;
-    builder << "code(" << status.code() << "), sub-code(" << status.subcode() << "), sev(" << status.severity() << ") - " << status.ToString();
+    builder << status.ToString() << " - code(" << status.code() << "), sub-code(" << status.subcode() << "), sev(" << status.severity() << ")";
     return builder.str();
 }
 
