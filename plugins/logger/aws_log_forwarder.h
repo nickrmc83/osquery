@@ -202,7 +202,7 @@ class AwsLogForwarder : public BufferedLogForwarder {
           (retry == 0 ? 0 : base_retry_delay) + (retry * 1000U);
       if (retry_delay != 0) {
         // We set an upper bound on the delay. We're happy for occasional failures in order to ensure timely delivery.
-        retry_delay = std::min(15000, retry);
+        retry_delay = std::min(15000UL, retry);
         pause(std::chrono::milliseconds(retry_delay));
 
         /* Stop retrying, osquery should shutdown; we fail the send
