@@ -367,14 +367,25 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
 
   auto s = getDB()->Write(options, &batch);
   if (s.ok()) {
-    return Status(s.code(), s.ToString());
+    return Status(Status::kSuccessCode, s.ToString());
   }
+
   std::stringstream error_builder;
   error_builder << s.ToString()
                 << " - code/sub-code/severity " << s.code()
                 << "/" << s.subcode()
                 << "/" << s.severity();
   auto error_string = error_builder.str();
+
+  // A soft error indicates that a write to a memtable has succeeded but the database is in a degraded state and disk
+  // writes might be stalled. We're optimistic treating this as a successful write and that the DB will recover.
+  // Failure to recover will result in a hard error later. Treating this write as successful trades-off the potential
+  // for missed events if the DB does not recover for the certainty of missing events across a restart.
+  if (s.severity() == rocksdb::Status::Severity::kSoftError) {
+    LOG(ERROR) << "Soft error encountered during putBatch, continuing optimistically: " << error_string;
+    return Status(Status::kSuccessCode, s.ToString());
+  }
+
   if (s.code() != 0 && s.IsIOError()) {
     // An error occurred, check if it is an IO error and remove the offending
     // specific filename or log name.
