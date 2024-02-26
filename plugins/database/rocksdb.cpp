@@ -8,6 +8,7 @@
  */
 
 #include <sys/stat.h>
+#include <sstream>
 
 #include <rocksdb/db.h>
 #include <rocksdb/env.h>
@@ -365,17 +366,25 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
   }
 
   auto s = getDB()->Write(options, &batch);
+  if (s.ok()) {
+    return Status(s.code(), s.ToString());
+  }
+  std::stringstream error_builder;
+  error_builder << s.ToString()
+                << " - code/sub-code/severity " << s.code()
+                << "/" << s.subcode()
+                << "/" << s.severity();
+  auto error_string = error_builder.str();
   if (s.code() != 0 && s.IsIOError()) {
     // An error occurred, check if it is an IO error and remove the offending
     // specific filename or log name.
-    std::string error_string = s.ToString();
     size_t error_pos = error_string.find_last_of(":");
     if (error_pos != std::string::npos) {
       return Status(s.code(), "IOError: " + error_string.substr(error_pos + 2));
     }
   }
 
-  return Status(s.code(), s.ToString());
+  return Status(s.code(), error_string);
 }
 
 Status RocksDBDatabasePlugin::put(const std::string& domain,
