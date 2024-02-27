@@ -6,7 +6,6 @@
  *
  * SPDX-License-Identifier: (Apache-2.0 OR GPL-2.0-only)
  */
-
 #include <sys/stat.h>
 #include <sstream>
 
@@ -31,6 +30,7 @@ HIDDEN_FLAG(int32, rocksdb_write_buffer, 16, "Max write buffer number");
 HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
+HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 5, "Background failure auto-recovery retry count");
 
 DECLARE_string(database_path);
 
@@ -41,6 +41,9 @@ DECLARE_string(database_path);
  * The two primary external systems are the RocksDB logger plugin and tests.
  */
 std::atomic<bool> kRocksDBCorruptionIndicator{false};
+
+/// Mark asynchronous rocksdb failure.
+std::atomic<bool> kRocksDBFailedIndicator{false};
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
@@ -74,6 +77,30 @@ void GlogRocksDBLogger::Logv(const char* format, va_list ap) {
   }
 }
 
+class EventHandler : public rocksdb::EventListener {
+  public:
+    void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
+                              rocksdb::Status status,
+                              bool* auto_recovery) {
+      LOG(ERROR) << "Rockdb auto recovery begins: " << static_cast<uint>(reason)
+                   << " " << status.ToString()
+                   << " code: " << status.code()
+                   << "/" << status.subcode()
+                   << "/" << status.severity()
+                   << ", auto_recovery" << (auto_recovery ? *auto_recovery : false);
+    }
+
+    void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) {
+      LOG(ERROR) << "Rockdb auto recovery ends: old error: " << info.old_bg_error.ToString()
+                 << ", new error: " << info.new_bg_error.ToString();
+      if (info.new_bg_error.IsAborted()) {
+        // Auto recovery failed. We'll signal for shutdown to commence.
+        LOG(ERROR) << "Considering Rocksdb in irrecoverable state requiring a restart";
+        kRocksDBFailedIndicator = true;
+      }
+    }
+};
+
 Status RocksDBDatabasePlugin::setUp() {
   if (!allowOpen()) {
     LOG(WARNING) << RLOG(1629) << "Not allowed to set up database plugin";
@@ -97,7 +124,7 @@ Status RocksDBDatabasePlugin::setUp() {
     // Set meta-data (mostly) handling options.
     options_.create_if_missing = true;
     options_.create_missing_column_families = true;
-    options_.info_log_level = rocksdb::ERROR_LEVEL;
+    options_.info_log_level = rocksdb::WARN_LEVEL;
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
     options_.max_log_file_size = 1024 * 1024 * 1;
@@ -117,6 +144,11 @@ Status RocksDBDatabasePlugin::setUp() {
         static_cast<int>(FLAGS_rocksdb_merge_number);
     options_.max_background_flushes =
         static_cast<int>(FLAGS_rocksdb_background_flushes);
+    // Support background resume error handling. Whilst there's a background error, the DB may not accept new records.
+    // We choose this over immediate restart to reduce the number of events that may be lost.
+    options_.max_bgerror_resume_count = static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
+    // TODO: implement an EventListener to log when a DB enters a recovery loop.
+    options_.listeners = std::vector<std::shared_ptr<rocksdb::EventListener>>{std::make_shared<EventHandler>()};
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -344,6 +376,9 @@ inline bool skipWal(const std::string& domain) {
 
 Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
                                        const DatabaseStringValueList& data) {
+  if (kRocksDBFailedIndicator) {
+    return Status(1, "Database failed");
+  }
   auto cfh = getHandleForColumnFamily(domain);
   if (cfh == nullptr) {
     return Status(1, "Could not get column family for " + domain);
@@ -370,32 +405,36 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
     return Status(Status::kSuccessCode, s.ToString());
   }
 
+  // Soft and hard errors indicate temporary degredation of the DB. During this time writes are not guaranteed to succeed.
+  // We choose to drop events during this period instead of restarting the daemon. This hopefully reduces the total number of
+  // dropped events which would occur with a restart. A failure to auto recover will set the kRocksDBFailedIndicator flag causing
+  // subsequent writes to the DB to fail before being attempted.
   std::stringstream error_builder;
   error_builder << s.ToString()
                 << " - code/sub-code/severity " << s.code()
                 << "/" << s.subcode()
                 << "/" << s.severity();
   auto error_string = error_builder.str();
-
-  // A soft error indicates that a write to a memtable has succeeded but the database is in a degraded state and disk
-  // writes might be stalled. We're optimistic treating this as a successful write and that the DB will recover.
-  // Failure to recover will result in a hard error later. Treating this write as successful trades-off the potential
-  // for missed events if the DB does not recover for the certainty of missing events across a restart.
-  if (s.severity() == rocksdb::Status::Severity::kSoftError) {
-    LOG(ERROR) << "Soft error encountered during putBatch, continuing optimistically: " << error_string;
-    return Status(Status::kSuccessCode, s.ToString());
-  }
-
-  if (s.code() != 0 && s.IsIOError()) {
+  if (s.IsIOError()) {
     // An error occurred, check if it is an IO error and remove the offending
     // specific filename or log name.
     size_t error_pos = error_string.find_last_of(":");
     if (error_pos != std::string::npos) {
-      return Status(s.code(), "IOError: " + error_string.substr(error_pos + 2));
+      error_string = error_string.substr(error_pos + 2);
     }
   }
 
-  return Status(s.code(), error_string);
+  switch (s.severity()) {
+    case rocksdb::Status::Severity::kSoftError:
+      LOG(ERROR) << "Soft error encountered during putBatch, write to memtable success but not persisted: " << error_string;
+      return Status(Status::kSuccessCode, error_string);
+    case rocksdb::Status::Severity::kHardError:
+      LOG(ERROR) << "Hard error encountered during putBatch, continuing optimistically but this event is lost: " << error_string;
+      return Status(Status::kSuccessCode, error_string);
+    default:
+      LOG(ERROR) << "Terminal error encountered during putBatch: " << error_string;
+      Status(s.code(), error_string);
+  }
 }
 
 Status RocksDBDatabasePlugin::put(const std::string& domain,
