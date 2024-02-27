@@ -426,7 +426,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
 
   switch (s.severity()) {
     case rocksdb::Status::Severity::kSoftError:
-      LOG(ERROR) << "Soft error encountered during putBatch, write to memtable success but not persisted: " << error_string;
+      LOG(ERROR) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
       return Status(Status::kSuccessCode, error_string);
     case rocksdb::Status::Severity::kHardError:
       LOG(ERROR) << "Hard error encountered during putBatch, continuing optimistically but this event is lost: " << error_string;
@@ -458,6 +458,7 @@ Status RocksDBDatabasePlugin::remove(const std::string& domain,
   } else {
     options.sync = false;
   }
+  // TODO: handle background errors here
   auto s = getDB()->Delete(options, cfh, key);
   return Status(s.code(), s.ToString());
 }
@@ -484,6 +485,7 @@ Status RocksDBDatabasePlugin::removeRange(const std::string& domain,
   } else {
     options.sync = false;
   }
+  // TODO: handle background errors here
   auto s = getDB()->DeleteRange(options, cfh, low, high);
   if (low <= high) {
     s = getDB()->Delete(options, cfh, high);
