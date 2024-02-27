@@ -30,7 +30,7 @@ HIDDEN_FLAG(int32, rocksdb_write_buffer, 16, "Max write buffer number");
 HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
-HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 5, "Background failure auto-recovery retry count");
+HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 50, "Background failure auto-recovery retry count");
 
 DECLARE_string(database_path);
 
