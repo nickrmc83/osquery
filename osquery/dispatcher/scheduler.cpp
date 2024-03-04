@@ -153,7 +153,6 @@ Status launchQuery(const std::string& name, const ScheduledQuery& query) {
       // If log directory is not available, then the daemon shouldn't continue.
       std::string message = "Error logging the results of query: " + name +
                             ": " + status.toString();
-      requestShutdown(EXIT_CATASTROPHIC, message);
     }
     return status;
   }
@@ -185,7 +184,7 @@ Status launchQuery(const std::string& name, const ScheduledQuery& query) {
     std::string message = "Error adding new results to database for query " +
                           name + ": " + status.what();
     // If the database is not available then the daemon cannot continue.
-    requestShutdown(EXIT_CATASTROPHIC, message);
+    return status;
   }
 
   if (!query.reportRemovedRows()) {
@@ -205,7 +204,6 @@ Status launchQuery(const std::string& name, const ScheduledQuery& query) {
     // If log directory is not available, then the daemon shouldn't continue.
     std::string message = "Error logging the results of query: " + name + ": " +
                           status.toString();
-    requestShutdown(EXIT_CATASTROPHIC, message);
   }
   return status;
 }
