@@ -428,7 +428,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
       return Status(Status::kSuccessCode, error_string);
     default:
       LOG(ERROR) << "Terminal error encountered during putBatch: " << error_string;
-      Status(s.code(), error_string);
+      return Status(s.code(), error_string);
   }
 }
 
