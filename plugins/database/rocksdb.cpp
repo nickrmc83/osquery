@@ -42,9 +42,6 @@ DECLARE_string(database_path);
  */
 std::atomic<bool> kRocksDBCorruptionIndicator{false};
 
-/// Mark asynchronous rocksdb failure.
-std::atomic<bool> kRocksDBFailedIndicator{false};
-
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
 
@@ -77,8 +74,10 @@ void GlogRocksDBLogger::Logv(const char* format, va_list ap) {
   }
 }
 
+// EventHandler listens for various rocksdb events and log them.
 class EventHandler : public rocksdb::EventListener {
   public:
+    // OnErrorRecoveryBegin is called when rocksdb encounters an error.
     void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
                               rocksdb::Status status,
                               bool* auto_recovery) {
@@ -89,15 +88,10 @@ class EventHandler : public rocksdb::EventListener {
                    << "/" << status.severity()
                    << ", auto_recovery" << (auto_recovery ? *auto_recovery : false);
     }
-
+    // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) {
       LOG(ERROR) << "Rockdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString();
-      if (info.new_bg_error.IsAborted()) {
-        // Auto recovery failed. We'll signal for shutdown to commence.
-        LOG(ERROR) << "Considering Rocksdb in irrecoverable state requiring a restart";
-        kRocksDBFailedIndicator = true;
-      }
     }
 };
 
@@ -149,6 +143,11 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.max_bgerror_resume_count = static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
     // TODO: implement an EventListener to log when a DB enters a recovery loop.
     options_.listeners = std::vector<std::shared_ptr<rocksdb::EventListener>>{std::make_shared<EventHandler>()};
+    // There's an issue with rocksdb whereby it regularly encounters issues during background compactions and flushes.
+    // We suspect this is due to a race condition apparent due to our use of it whereby we bypass WAL and FS sync for
+    // performance reasons. As such we disable paranoid checks that in turn stops background issues bubbling up to
+    // foreground requests.
+    options_.paranoid_checks = false;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -376,9 +375,6 @@ inline bool skipWal(const std::string& domain) {
 
 Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
                                        const DatabaseStringValueList& data) {
-  if (kRocksDBFailedIndicator) {
-    return Status(1, "Database failed");
-  }
   auto cfh = getHandleForColumnFamily(domain);
   if (cfh == nullptr) {
     return Status(1, "Could not get column family for " + domain);
@@ -407,8 +403,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
 
   // Soft and hard errors indicate temporary degredation of the DB. During this time writes are not guaranteed to succeed.
   // We choose to drop events during this period instead of restarting the daemon. This hopefully reduces the total number of
-  // dropped events which would occur with a restart. A failure to auto recover will set the kRocksDBFailedIndicator flag causing
-  // subsequent writes to the DB to fail before being attempted.
+  // dropped events which would occur with a restart.
   std::stringstream error_builder;
   error_builder << s.ToString()
                 << " - code/sub-code/severity " << s.code()
