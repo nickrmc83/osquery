@@ -139,6 +139,7 @@ Status RocksDBDatabasePlugin::setUp() {
         static_cast<int>(FLAGS_rocksdb_merge_number);
     options_.max_background_flushes =
         static_cast<int>(FLAGS_rocksdb_background_flushes);
+    options_.max_background_compactions = 1;
     // Support background resume error handling. Whilst there's a background error, the DB may not accept new records.
     // We choose this over immediate restart to reduce the number of events that may be lost.
     options_.max_bgerror_resume_count = static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
