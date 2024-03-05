@@ -92,8 +92,8 @@ class EventHandler : public rocksdb::EventListener {
                    << "/" << status.subcode()
                    << "/" << status.severity()
                    << ", auto_recovery " << (auto_recovery ? (*auto_recovery ? "true" : "false") : "unset");
-      // After 5 background error recoveries, we signal shutdown and consider rocksdb. Note this is different from
-      // recovery retries.
+      // After 5 background error recoveries, we signal shutdown and consider rocksdb failed.
+      // Note this is different from recovery retries. Each begin can try upto rocksdb_max_bgerror_resume_count times.
       if (count == 5) {
         LOG(ERROR) << "Signalling catastrophic error after 5 error recovery begins: " << status.ToString();
         requestShutdown(EXIT_CATASTROPHIC, status.ToString());
