@@ -43,6 +43,9 @@ DECLARE_string(database_path);
  */
 std::atomic<bool> kRocksDBCorruptionIndicator{false};
 
+/**
+ * @brief Track error recoveries so that we can signal shutdown after a threshold of background failures has been reached. 
+*/
 std::atomic<size_t> kRocksDBBackgroundErrorCount{0};
 
 /// Backing-storage provider for osquery internal/core.
@@ -101,6 +104,7 @@ class EventHandler : public rocksdb::EventListener {
     }
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
+      auto counter = kRocksDBBackgroundErrorCount.fetch_sub(1);
       LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString();
     }
@@ -432,6 +436,9 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
   }
 
   switch (s.severity()) {
+    case rocksdb::Status::Severity::kNoError:
+      LOG(ERROR) << "No foreground error encountered during putBatch, write to memtable success: " << error_string;
+      return Status(Status::kSuccessCode, error_string);
     case rocksdb::Status::Severity::kSoftError:
       LOG(ERROR) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
       return Status(Status::kSuccessCode, error_string);
