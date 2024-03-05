@@ -31,7 +31,7 @@ HIDDEN_FLAG(int32, rocksdb_write_buffer, 16, "Max write buffer number");
 HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 1, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
-HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 50, "Background failure auto-recovery retry count");
+HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 5, "Background failure auto-recovery retry count");
 
 DECLARE_string(database_path);
 
@@ -42,6 +42,8 @@ DECLARE_string(database_path);
  * The two primary external systems are the RocksDB logger plugin and tests.
  */
 std::atomic<bool> kRocksDBCorruptionIndicator{false};
+
+std::atomic<size_t> kRocksDBBackgroundErrorCount{0};
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
@@ -81,17 +83,25 @@ class EventHandler : public rocksdb::EventListener {
     // OnErrorRecoveryBegin is called when rocksdb encounters an error.
     void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
                               rocksdb::Status status,
-                              bool* auto_recovery) {
-      LOG(ERROR) << "Rockdb auto recovery begins: " << static_cast<uint>(reason)
+                              bool* auto_recovery) override {
+      auto count = kRocksDBBackgroundErrorCount.fetch_add(1);
+      LOG(ERROR) << "rocksdb auto recovery begins: " << count 
+                   << " " << static_cast<uint>(reason)
                    << " " << status.ToString()
                    << " code: " << status.code()
                    << "/" << status.subcode()
                    << "/" << status.severity()
-                   << ", auto_recovery" << (auto_recovery ? *auto_recovery : false);
+                   << ", auto_recovery " << (auto_recovery ? (*auto_recovery ? "true" : "false") : "unset");
+      // After 5 background error recoveries, we signal shutdown and consider rocksdb. Note this is different from
+      // recovery retries.
+      if (count == 5) {
+        LOG(ERROR) << "Signalling catastrophic error after 5 error recovery begins: " << status.ToString();
+        requestShutdown(EXIT_CATASTROPHIC, status.ToString());
+      }
     }
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
-    void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) {
-      LOG(ERROR) << "Rockdb auto recovery ends: old error: " << info.old_bg_error.ToString()
+    void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
+      LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString();
     }
 };
