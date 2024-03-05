@@ -437,7 +437,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
       return Status(Status::kSuccessCode, error_string);
     case rocksdb::Status::Severity::kHardError:
       LOG(ERROR) << "Hard error encountered during putBatch, continuing optimistically but this event is lost: " << error_string;
-      return Status(s.severity(), error_string);
+      return Status(s.code(), error_string);
     default:
       LOG(ERROR) << "Terminal error encountered during putBatch: " << error_string;
       requestShutdown(EXIT_CATASTROPHIC, error_string);
