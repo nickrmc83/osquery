@@ -89,8 +89,8 @@ class EventHandler : public rocksdb::EventListener {
     void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
                               rocksdb::Status status,
                               bool* auto_recovery) override {
-      auto count = kRocksDBBackgroundErrorCount.fetch_add(1, std::memory_order_relaxed);
-      LOG(ERROR) << "rocksdb auto recovery begins: " << count 
+      auto background_errors = kRocksDBBackgroundErrorCount.fetch_add(1, std::memory_order_relaxed);
+      LOG(ERROR) << "rocksdb auto recovery begins: " << background_errors 
                    << " background failures, " << static_cast<uint>(reason)
                    << " " << status.ToString()
                    << " code: " << status.code()
@@ -99,17 +99,17 @@ class EventHandler : public rocksdb::EventListener {
                    << ", auto_recovery " << (auto_recovery ? (*auto_recovery ? "true" : "false") : "unset");
       // After 5 background error recoveries, we signal shutdown and consider rocksdb failed.
       // Note this is different from recovery retries. Each begin can try upto rocksdb_max_bgerror_resume_count times.
-      if (count >= 5) {
+      if (background_errors >= 5) {
         LOG(ERROR) << "Signalling catastrophic error after at least 5 error recovery begins without completions: " << status.ToString();
         requestShutdown(EXIT_CATASTROPHIC, status.ToString());
       }
     }
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
-      auto counter = kRocksDBBackgroundErrorCount.fetch_sub(1, std::memory_order_relaxed);
+      auto background_errors = kRocksDBBackgroundErrorCount.fetch_sub(1, std::memory_order_relaxed);
       LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString()
-                 << ", failure counter: " << counter;
+                 << ", failure counter: " << background_errors;
     }
 };
 
