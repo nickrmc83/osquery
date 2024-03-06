@@ -439,7 +439,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
   }
 
   // If the error is a foreground error, increment a counter which we can use to terminate ourselves above a threshold.
-  auto foreground_errors = kRocksDBForegroundErrorCount += (s.severity() == rocksdb::Status::Severity::kNoError) ? 
+  auto foreground_errors = (s.severity() == rocksdb::Status::Severity::kNoError) ? 
                            kRocksDBForegroundErrorCount++ :
                            kRocksDBForegroundErrorCount.load();
 
