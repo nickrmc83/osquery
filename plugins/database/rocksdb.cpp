@@ -46,7 +46,9 @@ std::atomic<bool> kRocksDBCorruptionIndicator{false};
 /**
  * @brief Track error recoveries so that we can signal shutdown after a threshold of background failures has been reached. 
 */
-std::atomic<size_t> kRocksDBBackgroundErrorCount{0};
+static std::atomic<size_t> kRocksDBBackgroundErrorCount{0};
+
+static std::atomic<size_t> kRocksDBForegroundErrorCount{0};
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
@@ -87,9 +89,9 @@ class EventHandler : public rocksdb::EventListener {
     void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
                               rocksdb::Status status,
                               bool* auto_recovery) override {
-      auto count = kRocksDBBackgroundErrorCount.fetch_add(1);
+      auto count = kRocksDBBackgroundErrorCount.fetch_add(1, std::memory_order_relaxed);
       LOG(ERROR) << "rocksdb auto recovery begins: " << count 
-                   << " " << static_cast<uint>(reason)
+                   << " background failures, " << static_cast<uint>(reason)
                    << " " << status.ToString()
                    << " code: " << status.code()
                    << "/" << status.subcode()
@@ -97,16 +99,17 @@ class EventHandler : public rocksdb::EventListener {
                    << ", auto_recovery " << (auto_recovery ? (*auto_recovery ? "true" : "false") : "unset");
       // After 5 background error recoveries, we signal shutdown and consider rocksdb failed.
       // Note this is different from recovery retries. Each begin can try upto rocksdb_max_bgerror_resume_count times.
-      if (count == 5) {
-        LOG(ERROR) << "Signalling catastrophic error after 5 error recovery begins: " << status.ToString();
+      if (count >= 5) {
+        LOG(ERROR) << "Signalling catastrophic error after at least 5 error recovery begins without completions: " << status.ToString();
         requestShutdown(EXIT_CATASTROPHIC, status.ToString());
       }
     }
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
-      auto counter = kRocksDBBackgroundErrorCount.fetch_sub(1);
+      auto counter = kRocksDBBackgroundErrorCount.fetch_sub(1, std::memory_order_relaxed);
       LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
-                 << ", new error: " << info.new_bg_error.ToString();
+                 << ", new error: " << info.new_bg_error.ToString()
+                 << ", failure counter: " << counter;
     }
 };
 
@@ -435,10 +438,21 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
     }
   }
 
+  // If the error is a foreground error, increment a counter which we can use to terminate ourselves above a threshold.
+  auto foreground_errors = (s.severity() == rocksdb::Status::Severity::kNoError) ? 
+                           kRocksDBForegroundErrorCount.fetch_add(1, std::memory_order_relaxed) :
+                           kRocksDBForegroundErrorCount.load();
+
   switch (s.severity()) {
     case rocksdb::Status::Severity::kNoError:
-      LOG(ERROR) << "No foreground error encountered during putBatch, write to memtable success: " << error_string;
-      return Status(Status::kSuccessCode, error_string);
+      LOG(ERROR) << "Foreground error encountered during putBatch, write to memtable failed: "
+                 << foreground_errors << " foreground failures, " << error_string;
+      if (foreground_errors >= 10) {
+        LOG(ERROR) << "Too many foreground write errors, signalling shutdown: " 
+                   << foreground_errors << "foreground failures, " << error_string;
+        requestShutdown(EXIT_CATASTROPHIC, error_string);
+      }
+      return Status(s.code(), error_string);
     case rocksdb::Status::Severity::kSoftError:
       LOG(ERROR) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
       return Status(Status::kSuccessCode, error_string);
