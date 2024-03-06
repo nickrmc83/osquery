@@ -89,7 +89,7 @@ class EventHandler : public rocksdb::EventListener {
     void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
                               rocksdb::Status status,
                               bool* auto_recovery) override {
-      auto background_errors = kRocksDBBackgroundErrorCount.fetch_add(1, std::memory_order_relaxed);
+      auto background_errors = ++kRocksDBBackgroundErrorCount;
       LOG(ERROR) << "rocksdb auto recovery begins: " << background_errors 
                    << " background failures, " << static_cast<uint>(reason)
                    << " " << status.ToString()
@@ -106,7 +106,7 @@ class EventHandler : public rocksdb::EventListener {
     }
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
-      auto background_errors = kRocksDBBackgroundErrorCount.fetch_sub(1, std::memory_order_relaxed);
+      auto background_errors = --kRocksDBBackgroundErrorCount;
       LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString()
                  << ", failure counter: " << background_errors;
@@ -439,8 +439,8 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
   }
 
   // If the error is a foreground error, increment a counter which we can use to terminate ourselves above a threshold.
-  auto foreground_errors = (s.severity() == rocksdb::Status::Severity::kNoError) ? 
-                           kRocksDBForegroundErrorCount.fetch_add(1, std::memory_order_relaxed) :
+  auto foreground_errors = kRocksDBForegroundErrorCount += (s.severity() == rocksdb::Status::Severity::kNoError) ? 
+                           kRocksDBForegroundErrorCount++ :
                            kRocksDBForegroundErrorCount.load();
 
   switch (s.severity()) {
