@@ -32,6 +32,7 @@ HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 1, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
 HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 5, "Background failure auto-recovery retry count");
+HIDDEN_FLAG(uint32, foreground_write_error_threshold, 10, "The number of foreground write errors before a shutdown is initiated");
 
 DECLARE_string(database_path);
 
@@ -44,11 +45,9 @@ DECLARE_string(database_path);
 std::atomic<bool> kRocksDBCorruptionIndicator{false};
 
 /**
- * @brief Track error recoveries so that we can signal shutdown after a threshold of background failures has been reached. 
+ * @brief Track foreground error count
 */
-static std::atomic<size_t> kRocksDBBackgroundErrorCount{0};
-
-static std::atomic<size_t> kRocksDBForegroundErrorCount{0};
+static std::atomic<uint32_t> kRocksDBForegroundErrorCount{0};
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
@@ -88,28 +87,37 @@ class EventHandler : public rocksdb::EventListener {
     // OnErrorRecoveryBegin is called when rocksdb encounters an error.
     void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
                               rocksdb::Status status,
-                              bool* auto_recovery) override {
-      auto background_errors = ++kRocksDBBackgroundErrorCount;
-      LOG(ERROR) << "rocksdb auto recovery begins: " << background_errors 
-                   << " background failures, " << static_cast<uint>(reason)
+                              bool* auto_recovery) override {                       
+      LOG(ERROR) << "rocksdb auto recovery begins: " 
+                   << static_cast<uint>(reason)
                    << " " << status.ToString()
                    << " code: " << status.code()
                    << "/" << status.subcode()
                    << "/" << status.severity()
-                   << ", auto_recovery " << (auto_recovery ? (*auto_recovery ? "true" : "false") : "unset");
-      // After 5 background error recoveries, we signal shutdown and consider rocksdb failed.
-      // Note this is different from recovery retries. Each begin can try upto rocksdb_max_bgerror_resume_count times.
-      if (background_errors >= 5) {
-        LOG(ERROR) << "Signalling catastrophic error after at least 5 error recovery begins without completions: " << status.ToString();
+                   << ", auto_recovery " << (*auto_recovery ? "true" : "false");
+      if (status.ok()) {
+        return; // We do not expect this to ever happen.
+      } 
+      
+      // We treat corruption or a signal that no error recovery will be attempted as fatal which will be solved
+      // by a process restart.
+      if (status.IsCorruption() || !*auto_recovery) {
+        // Background error that cannot be recovered from.
+        LOG(ERROR) << "Signalling catastrophic error which cannot be auto-recovered: " 
+                   << status.ToString()
+                   << ", auto-recovery: " << (*auto_recovery ? "true" : "false");
         requestShutdown(EXIT_CATASTROPHIC, status.ToString());
       }
     }
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
-      auto background_errors = --kRocksDBBackgroundErrorCount;
       LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString()
-                 << ", failure counter: " << background_errors;
+;
+      if (!info.new_bg_error.ok()) {
+        LOG(ERROR) << "Signalling catastrophic error after error recovery failure: " << info.new_bg_error.ToString();
+        requestShutdown(EXIT_CATASTROPHIC, info.new_bg_error.ToString());
+      }
     }
 };
 
@@ -447,7 +455,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
     case rocksdb::Status::Severity::kNoError:
       LOG(ERROR) << "Foreground error encountered during putBatch, write to memtable failed: "
                  << foreground_errors << " foreground failures, " << error_string;
-      if (foreground_errors >= 10) {
+      if (foreground_errors == FLAGS_foreground_write_error_threshold) {
         LOG(ERROR) << "Too many foreground write errors, signalling shutdown: " 
                    << foreground_errors << "foreground failures, " << error_string;
         requestShutdown(EXIT_CATASTROPHIC, error_string);
@@ -457,7 +465,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
       LOG(ERROR) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
       return Status(Status::kSuccessCode, error_string);
     case rocksdb::Status::Severity::kHardError:
-      LOG(ERROR) << "Hard error encountered during putBatch, continuing optimistically but this event is lost: " << error_string;
+      LOG(ERROR) << "Hard error encountered during putBatch, continuing optimistically but this data is lost: " << error_string;
       return Status(s.code(), error_string);
     default:
       LOG(ERROR) << "Terminal error encountered during putBatch: " << error_string;
