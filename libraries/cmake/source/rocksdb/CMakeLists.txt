@@ -378,16 +378,6 @@ function(rocksdbMain)
     )
   endif()
 
-  if(NOT PLATFORM_MACOS)
-    target_sources(thirdparty_rocksdb PRIVATE
-      "${library_root}/third-party/folly/folly/detail/Futex.cpp"
-      "${library_root}/third-party/folly/folly/synchronization/AtomicNotification.cpp"
-      "${library_root}/third-party/folly/folly/synchronization/DistributedMutex.cpp"
-      "${library_root}/third-party/folly/folly/synchronization/ParkingLot.cpp"
-      "${library_root}/third-party/folly/folly/synchronization/WaitOptions.cpp"
-    )
-  endif()
-
   if(TARGET_PROCESSOR STREQUAL "x86_64")
     if(NOT PLATFORM_WINDOWS)
       set_source_files_properties("${crc32_impl}" PROPERTIES
@@ -528,12 +518,6 @@ function(rocksdbMain)
     "${library_root}"
     "${library_root}/include"
   )
-
-  if(NOT PLATFORM_MACOS)
-    target_include_directories(thirdparty_rocksdb PRIVATE
-      "${library_root}/third-party/folly"
-    )
-  endif()
 
   target_include_directories(thirdparty_rocksdb SYSTEM INTERFACE
     "${library_root}/include"
