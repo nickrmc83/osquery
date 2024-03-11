@@ -1,9 +1,8 @@
 // Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
 #include <memory>
-
+#include "rocksdb/utilities/object_registry.h"
 #include "rocksdb/version.h"
-#include "util/string_util.h"
 
 // The build script may replace these values with real values based
 // on whether or not GIT is available and the platform settings
@@ -21,6 +20,9 @@ static const std::string rocksdb_build_date = "rocksdb_build_date:2021-09-30 14:
 #endif
 
 namespace ROCKSDB_NAMESPACE {
+
+std::unordered_map<std::string, ROCKSDB_NAMESPACE::RegistrarFunc> ROCKSDB_NAMESPACE::ObjectRegistry::builtins_ = {};
+
 static void AddProperty(std::unordered_map<std::string, std::string> *props, const std::string& name) {
   size_t colon = name.find(":");
   if (colon != std::string::npos && colon > 0 && colon < name.length() - 1) {
@@ -30,6 +32,14 @@ static void AddProperty(std::unordered_map<std::string, std::string> *props, con
       // Everything before the colon is the name, after is the value
       (*props)[name.substr(0, colon)] = name.substr(colon + 1);
     }
+  }
+}
+
+std::string GetRocksVersionAsString(bool with_patch) {
+  if (with_patch) {
+    return std::to_string(ROCKSDB_MAJOR) + "." + std::to_string(ROCKSDB_MINOR) + std::to_string(ROCKSDB_PATCH);
+  } else {
+    return std::to_string(ROCKSDB_MAJOR) + "." + std::to_string(ROCKSDB_MINOR);
   }
 }
   
@@ -44,15 +54,6 @@ static std::unordered_map<std::string, std::string>* LoadPropertiesSet() {
 const std::unordered_map<std::string, std::string>& GetRocksBuildProperties() {
   static std::unique_ptr<std::unordered_map<std::string, std::string>> props(LoadPropertiesSet());
   return *props;
-}
-
-std::string GetRocksVersionAsString(bool with_patch) {
-  std::string version = ToString(ROCKSDB_MAJOR) + "." + ToString(ROCKSDB_MINOR);
-  if (with_patch) {
-    return version + "." + ToString(ROCKSDB_PATCH);
-  } else {
-    return version;
-  }
 }
   
 std::string GetRocksBuildInfoAsString(const std::string& program, bool verbose) {
