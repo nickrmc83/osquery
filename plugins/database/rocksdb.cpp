@@ -29,10 +29,10 @@ namespace osquery {
 /// Hidden flags created for internal stress testing.
 HIDDEN_FLAG(int32, rocksdb_write_buffer, 16, "Max write buffer number");
 HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
-HIDDEN_FLAG(int32, rocksdb_background_flushes, 1, "Max background flushes");
+HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
-HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 5, "Background failure auto-recovery retry count");
-HIDDEN_FLAG(uint32, foreground_write_error_threshold, 10, "The number of foreground write errors before a shutdown is initiated");
+HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 10, "Background failure auto-recovery retry count");
+HIDDEN_FLAG(uint32, rocksdb_foreground_write_error_threshold, 10, "The number of foreground write errors that can be encountered before a shutdown is initiated");
 
 DECLARE_string(database_path);
 
@@ -84,11 +84,11 @@ void GlogRocksDBLogger::Logv(const char* format, va_list ap) {
 // EventHandler listens for various rocksdb events and log them.
 class EventHandler : public rocksdb::EventListener {
   public:
-    // OnErrorRecoveryBegin is called when rocksdb encounters an error.
+    // OnErrorRecoveryBegin is called wh en rocksdb encounters an error.
     void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
                               rocksdb::Status status,
                               bool* auto_recovery) override {                       
-      LOG(ERROR) << "rocksdb auto recovery begins: " 
+      LOG(WARNING) << "rocksdb auto recovery begins: " 
                    << static_cast<uint>(reason)
                    << " " << status.ToString()
                    << " code: " << status.code()
@@ -111,11 +111,12 @@ class EventHandler : public rocksdb::EventListener {
     }
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
-      LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
+      LOG(WARNING) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString();
 ;
       if (!info.new_bg_error.ok()) {
-        LOG(ERROR) << "Signalling catastrophic error after error recovery failure: " << info.new_bg_error.ToString();
+        LOG(ERROR) << "Signalling catastrophic error after error recovery failure: " 
+                   << info.new_bg_error.ToString();
         requestShutdown(EXIT_CATASTROPHIC, info.new_bg_error.ToString());
       }
     }
@@ -453,16 +454,16 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
 
   switch (s.severity()) {
     case rocksdb::Status::Severity::kNoError:
-      LOG(ERROR) << "Foreground error encountered during putBatch, write to memtable failed: "
+      LOG(WARNING) << "Foreground error encountered during putBatch: "
                  << foreground_errors << " foreground failures, " << error_string;
-      if (foreground_errors == FLAGS_foreground_write_error_threshold) {
+      if (foreground_errors == FLAGS_rocksdb_foreground_write_error_threshold) {
         LOG(ERROR) << "Too many foreground write errors, signalling shutdown: " 
-                   << foreground_errors << "foreground failures, " << error_string;
+                   << foreground_errors << " foreground failures, " << error_string;
         requestShutdown(EXIT_CATASTROPHIC, error_string);
       }
       return Status(s.code(), error_string);
     case rocksdb::Status::Severity::kSoftError:
-      LOG(ERROR) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
+      LOG(WARNING) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
       return Status(Status::kSuccessCode, error_string);
     case rocksdb::Status::Severity::kHardError:
       LOG(ERROR) << "Hard error encountered during putBatch, continuing optimistically but this data is lost: " << error_string;
