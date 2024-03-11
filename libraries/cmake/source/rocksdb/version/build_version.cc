@@ -7,8 +7,8 @@
 
 // The build script may replace these values with real values based
 // on whether or not GIT is available and the platform settings
-static const std::string rocksdb_build_git_sha  = "rocksdb_build_git_sha:da11a59034584ea2d0911268b8136e5249d6b692";
-static const std::string rocksdb_build_git_tag = "rocksdb_build_git_tag:v6.29.5";
+static const std::string rocksdb_build_git_sha  = "rocksdb_build_git_sha:94a836c7ad32dc3ad0687ac067f1a824b95e3433";
+static const std::string rocksdb_build_git_tag = "rocksdb_build_git_tag:v7.10.2";
 #define HAS_GIT_CHANGES 0
 #if HAS_GIT_CHANGES == 0
 // If HAS_GIT_CHANGES is 0, the GIT date is used.
