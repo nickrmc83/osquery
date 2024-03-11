@@ -112,7 +112,7 @@ class EventHandler : public rocksdb::EventListener {
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
       LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
-                 << ", new error: " << info.new_bg_error.ToString()
+                 << ", new error: " << info.new_bg_error.ToString();
 ;
       if (!info.new_bg_error.ok()) {
         LOG(ERROR) << "Signalling catastrophic error after error recovery failure: " << info.new_bg_error.ToString();
