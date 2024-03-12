@@ -95,20 +95,8 @@ class EventHandler : public rocksdb::EventListener {
                    << "/" << status.subcode()
                    << "/" << status.severity()
                    << ", auto_recovery " << (*auto_recovery ? "true" : "false");
-      if (status.ok()) {
-        return; // We do not expect this to ever happen.
-      } 
-      
-      // We treat corruption or a signal that no error recovery will be attempted as fatal which will be solved
-      // by a process restart.
-      if (status.IsCorruption() || !*auto_recovery) {
-        // Background error that cannot be recovered from.
-        LOG(ERROR) << "Signalling catastrophic error which cannot be auto-recovered: " 
-                   << status.ToString()
-                   << ", auto-recovery: " << (*auto_recovery ? "true" : "false");
-        requestShutdown(EXIT_CATASTROPHIC, status.ToString());
-      }
     }
+
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
       LOG(WARNING) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
@@ -173,11 +161,11 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.max_bgerror_resume_count = static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
     // TODO: implement an EventListener to log when a DB enters a recovery loop.
     options_.listeners = std::vector<std::shared_ptr<rocksdb::EventListener>>{std::make_shared<EventHandler>()};
-    // There's an issue with rocksdb whereby it regularly encounters issues during background compactions and flushes.
-    // We suspect this is due to a race condition apparent due to our use of it whereby we bypass WAL and FS sync for
-    // performance reasons. As such we disable paranoid checks that in turn stops background issues bubbling up to
-    // foreground requests.
-    options_.paranoid_checks = false;
+    // paranoid_checks will cause rocksdb to enter read-only mode and signal to foreground request it has failed
+    // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
+    // quicker.
+    options_.paranoid_checks = true;
+    options_.atomic_flush = true;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
