@@ -166,6 +166,8 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.max_background_flushes =
         static_cast<int>(FLAGS_rocksdb_background_flushes);
     options_.max_background_compactions = 1;
+    options_.env->SetBackgroundThreads(options_.max_background_flushes, rocksdb::Env::Priority::HIGH);
+    options_.env->SetBackgroundThreads(options_.max_background_compactions, rocksdb::Env::Priority::LOW);
     // Support background resume error handling. Whilst there's a background error, the DB may not accept new records.
     // We choose this over immediate restart to reduce the number of events that may be lost.
     options_.max_bgerror_resume_count = static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
@@ -434,6 +436,7 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
   // dropped events which would occur with a restart.
   std::stringstream error_builder;
   error_builder << s.ToString()
+                << " - domain " << domain
                 << " - code/sub-code/severity " << s.code()
                 << "/" << s.subcode()
                 << "/" << s.severity();
