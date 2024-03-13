@@ -165,6 +165,7 @@ Status RocksDBDatabasePlugin::setUp() {
     // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
     // quicker.
     options_.paranoid_checks = true;
+    // atomic_flush enforces that column families are flushed together which thus ensuring the manifest is consistent. 
     options_.atomic_flush = true;
 
     // Create an environment to replace the default logger.
