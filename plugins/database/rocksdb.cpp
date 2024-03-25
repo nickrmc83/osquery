@@ -99,7 +99,7 @@ class EventHandler : public rocksdb::EventListener {
 
     // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
     void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
-      LOG(WARNING) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
+      LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
                  << ", new error: " << info.new_bg_error.ToString();
 ;
       if (!info.new_bg_error.ok()) {
@@ -164,7 +164,7 @@ Status RocksDBDatabasePlugin::setUp() {
     // paranoid_checks will cause rocksdb to enter read-only mode and signal to foreground request it has failed
     // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
     // quicker.
-    options_.paranoid_checks = true;
+    options_.paranoid_checks = false;
     // atomic_flush enforces that column families are flushed together which thus ensuring the manifest is consistent. 
     options_.atomic_flush = true;
 
