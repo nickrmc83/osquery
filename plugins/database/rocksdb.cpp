@@ -151,9 +151,7 @@ Status RocksDBDatabasePlugin::setUp() {
         static_cast<int>(FLAGS_rocksdb_write_buffer);
     options_.min_write_buffer_number_to_merge =
         static_cast<int>(FLAGS_rocksdb_merge_number);
-    options_.max_background_flushes =
-        static_cast<int>(FLAGS_rocksdb_background_flushes);
-    options_.max_background_compactions = 1;
+    options_.max_background_jobs = 1; // Only allow 1 background job (either flush or compaction) to run at a time.
     options_.env->SetBackgroundThreads(options_.max_background_flushes, rocksdb::Env::Priority::HIGH);
     options_.env->SetBackgroundThreads(options_.max_background_compactions, rocksdb::Env::Priority::LOW);
     // Support background resume error handling. Whilst there's a background error, the DB may not accept new records.
