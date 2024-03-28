@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include <thread>
 
 #include <rocksdb/db.h>
 
@@ -115,6 +116,9 @@ class RocksDBDatabasePlugin : public DatabasePlugin {
   /// Flush memtables and trigger compaction.
   void flush();
 
+  /// Flush wal.
+  void flushWal();
+
  private:
   /**
    * @brief Mark the RocksDB database as corrupted.
@@ -147,6 +151,11 @@ class RocksDBDatabasePlugin : public DatabasePlugin {
 
   /// Deconstruction mutex.
   Mutex close_mutex_;
+
+  std::atomic<bool> closing_;
+
+  /// WAL flush thread.
+  std::unique_ptr<std::thread> flush_wal_thread_;
 
  private:
   friend class GlogRocksDBLogger;

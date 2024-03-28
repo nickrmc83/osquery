@@ -151,7 +151,8 @@ Status RocksDBDatabasePlugin::setUp() {
         static_cast<int>(FLAGS_rocksdb_write_buffer);
     options_.min_write_buffer_number_to_merge =
         static_cast<int>(FLAGS_rocksdb_merge_number);
-    options_.max_background_jobs = 1; // Only allow 1 background job (either flush or compaction) to run at a time.
+    options_.max_background_flushes = FLAGS_rocksdb_background_flushes;
+    options_.max_background_compactions = 1;
     options_.env->SetBackgroundThreads(options_.max_background_flushes, rocksdb::Env::Priority::HIGH);
     options_.env->SetBackgroundThreads(options_.max_background_compactions, rocksdb::Env::Priority::LOW);
     // Support background resume error handling. Whilst there's a background error, the DB may not accept new records.
@@ -163,8 +164,13 @@ Status RocksDBDatabasePlugin::setUp() {
     // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
     // quicker.
     options_.paranoid_checks = false;
-    // atomic_flush enforces that column families are flushed together which thus ensuring the manifest is consistent. 
+    // atomic_flush enforces that all column families are flushed together atomically. 
     options_.atomic_flush = true;
+    // avoid_unnecessary_blocking_io will stop rocksdb from performing expensive io operations in the context of a client
+    // operation. io operations such as deleting files will instead be performed in a background thread.
+    options_.avoid_unnecessary_blocking_io = true;
+    // flush WAL on a schedule to maintain throughput at the expense of some potential data loss between flushes.
+    options_.manual_wal_flush = true;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -249,7 +255,24 @@ Status RocksDBDatabasePlugin::setUp() {
     }
   }
 
+  // Start a background thread to flush WAL regularly.
+  flush_wal_thread_ = std::make_unique<std::thread>(
+    std::bind(&RocksDBDatabasePlugin::flushWal, this));
+
   return Status(0);
+}
+
+void RocksDBDatabasePlugin::flushWal() {
+  uint64_t flushes = 0;
+  while(1) {
+    if (closing_.load(std::memory_order_relaxed)) {
+      LOG(WARNING) << "flushwal closing ...";
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(5)); // flush WAL once per 5 seconds
+    db_->FlushWAL(false);
+    LOG(WARNING) << "Flushed WAL: " << ++flushes;
+  }
 }
 
 Status RocksDBDatabasePlugin::compactFiles(const std::string& domain) {
@@ -290,6 +313,13 @@ void RocksDBDatabasePlugin::tearDown() {
 
 void RocksDBDatabasePlugin::close() {
   WriteLock lock(close_mutex_);
+  closing_ = true;
+  
+  // Wait for background flushing thread to complete.
+  if (flush_wal_thread_.get()) {
+    flush_wal_thread_->join();
+  }
+
   for (auto handle : handles_) {
     delete handle;
   }
@@ -387,7 +417,7 @@ Status RocksDBDatabasePlugin::put(const std::string& domain,
 }
 
 inline bool skipWal(const std::string& domain) {
-  return (kEvents == domain);
+  return (kEvents == domain) || (kLogs == domain);
 }
 
 Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
