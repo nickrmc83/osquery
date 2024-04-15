@@ -47,7 +47,7 @@ std::atomic<bool> kRocksDBCorruptionIndicator{false};
 /**
  * @brief Track foreground error count
 */
-static std::atomic<uint32_t> kRocksDBForegroundErrorCount{0};
+static std::atomic<size_t> kRocksDBForegroundErrorCount{0};
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
@@ -264,10 +264,12 @@ Status RocksDBDatabasePlugin::setUp() {
   return Status(0);
 }
 
+// flushWal flushes the WAL every 30 seconds. This is performed instead of inline flushing to maintain performance at the expense of
+// data loss during the flush window. When osquery is shutdown, the close() method will perform a final WAL flush.
 void RocksDBDatabasePlugin::flushWal() {
   uint64_t flushes = 0;
   while(1) {
-    std::this_thread::sleep_for(std::chrono::seconds(10)); // flush WAL once per 10 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(30));
     if (closing_.load(std::memory_order_acquire)) {
       LOG(INFO) << "flushWal closing ...";
       return;
