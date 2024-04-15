@@ -271,11 +271,11 @@ void RocksDBDatabasePlugin::flushWal() {
   while(1) {
     std::this_thread::sleep_for(std::chrono::seconds(30));
     if (closing_.load(std::memory_order_acquire)) {
-      LOG(INFO) << "flushWal closing ...";
+      LOG(WARNING) << "flushWal closing ...";
       return;
     }
     db_->FlushWAL(false);
-    LOG(INFO) << "Flushed WAL: " << ++flushes;
+    LOG(WARNING) << "Flushed WAL: " << ++flushes;
   }
 }
 
