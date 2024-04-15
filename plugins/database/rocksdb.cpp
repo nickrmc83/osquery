@@ -151,13 +151,15 @@ Status RocksDBDatabasePlugin::setUp() {
         static_cast<int>(FLAGS_rocksdb_write_buffer);
     options_.min_write_buffer_number_to_merge =
         static_cast<int>(FLAGS_rocksdb_merge_number);
-    options_.max_background_flushes = FLAGS_rocksdb_background_flushes;
+    options_.max_background_flushes =
+        static_cast<int>(FLAGS_rocksdb_background_flushes);
     options_.max_background_compactions = 1;
     options_.env->SetBackgroundThreads(options_.max_background_flushes, rocksdb::Env::Priority::HIGH);
     options_.env->SetBackgroundThreads(options_.max_background_compactions, rocksdb::Env::Priority::LOW);
     // Support background resume error handling. Whilst there's a background error, the DB may not accept new records.
     // We choose this over immediate restart to reduce the number of events that may be lost.
-    options_.max_bgerror_resume_count = static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
+    options_.max_bgerror_resume_count = 
+        static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
     // TODO: implement an EventListener to log when a DB enters a recovery loop.
     options_.listeners = std::vector<std::shared_ptr<rocksdb::EventListener>>{std::make_shared<EventHandler>()};
     // paranoid_checks will cause rocksdb to enter read-only mode and signal to foreground request it has failed
@@ -265,13 +267,13 @@ Status RocksDBDatabasePlugin::setUp() {
 void RocksDBDatabasePlugin::flushWal() {
   uint64_t flushes = 0;
   while(1) {
-    if (closing_.load(std::memory_order_relaxed)) {
-      LOG(WARNING) << "flushwal closing ...";
+    std::this_thread::sleep_for(std::chrono::seconds(10)); // flush WAL once per 10 seconds
+    if (closing_.load(std::memory_order_acquire)) {
+      LOG(INFO) << "flushWal closing ...";
       return;
     }
-    std::this_thread::sleep_for(std::chrono::seconds(5)); // flush WAL once per 5 seconds
     db_->FlushWAL(false);
-    LOG(WARNING) << "Flushed WAL: " << ++flushes;
+    LOG(INFO) << "Flushed WAL: " << ++flushes;
   }
 }
 
@@ -326,6 +328,7 @@ void RocksDBDatabasePlugin::close() {
   handles_.clear();
 
   if (db_ != nullptr) {
+    db_->FlushWAL(true);
     delete db_;
     db_ = nullptr;
   }

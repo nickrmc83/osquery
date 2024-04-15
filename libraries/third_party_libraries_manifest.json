@@ -268,7 +268,7 @@
   "rocksdb": {
     "product": "rocksdb",
     "vendor": "facebook",
-    "version": "6.29.5",
+    "version": "7.10.5",
     "commit": "da11a59034584ea2d0911268b8136e5249d6b692",
     "ignored-cves": []
   },
