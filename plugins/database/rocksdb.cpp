@@ -322,6 +322,7 @@ void RocksDBDatabasePlugin::close() {
   // Wait for background flushing thread to complete.
   if (flush_wal_thread_.get()) {
     flush_wal_thread_->join();
+    flush_wal_thread_.reset(nullptr);
   }
 
   for (auto handle : handles_) {
