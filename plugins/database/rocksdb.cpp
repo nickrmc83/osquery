@@ -137,9 +137,9 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.info_log_level = rocksdb::WARN_LEVEL;
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
-    options_.max_log_file_size = 1024 * 1024 * 1;
-    options_.max_open_files = -1; // keep all file descriptors cached at all times.
-    options_.stats_dump_period_sec = 600;
+    options_.max_log_file_size = 1024 * 1024 * 1; // 1MiB
+    options_.max_open_files = 256; // keep a lid on memory usage by restricting the number of SST files open and cached.
+    options_.stats_dump_period_sec = 600; // dump stats every 10 minutes.
     options_.max_manifest_file_size = 1024 * 1024 * 64; // 64MiB
 
     // Performance and optimization settings.
