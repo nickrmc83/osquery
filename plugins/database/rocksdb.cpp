@@ -33,6 +33,7 @@ HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
 HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 10, "Background failure auto-recovery retry count");
 HIDDEN_FLAG(uint32, rocksdb_foreground_write_error_threshold, 10, "The number of foreground write errors that can be encountered before a shutdown is initiated");
+HIDDEN_FLAG(uint32, rocksdb_wal_flush_period, 60, "The number of seconds between WAL flushes.");
 
 DECLARE_string(database_path);
 
@@ -137,9 +138,9 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
     options_.max_log_file_size = 1024 * 1024 * 1;
-    options_.max_open_files = 128;
-    options_.stats_dump_period_sec = 0;
-    options_.max_manifest_file_size = 1024 * 500;
+    options_.max_open_files = -1; // keep all file descriptors cached at all times.
+    options_.stats_dump_period_sec = 600;
+    options_.max_manifest_file_size = 1024 * 1024 * 64; // 64MiB
 
     // Performance and optimization settings.
     // Use rocksdb::kZSTD to use ZSTD database compression
@@ -160,19 +161,19 @@ Status RocksDBDatabasePlugin::setUp() {
     // We choose this over immediate restart to reduce the number of events that may be lost.
     options_.max_bgerror_resume_count = 
         static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
-    // TODO: implement an EventListener to log when a DB enters a recovery loop.
+    // We implement an event listener to subscribe to auto-recovery events for logging a signalling catastrophic failure.
     options_.listeners = std::vector<std::shared_ptr<rocksdb::EventListener>>{std::make_shared<EventHandler>()};
     // paranoid_checks will cause rocksdb to enter read-only mode and signal to foreground request it has failed
     // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
     // quicker.
     options_.paranoid_checks = false;
-    // atomic_flush enforces that all column families are flushed together atomically. 
+    // atomic_flush enforces that all column families are flushed together atomically.
     options_.atomic_flush = true;
     // avoid_unnecessary_blocking_io will stop rocksdb from performing expensive io operations in the context of a client
     // operation. io operations such as deleting files will instead be performed in a background thread.
     options_.avoid_unnecessary_blocking_io = true;
     // flush WAL on a schedule to maintain throughput at the expense of some potential data loss between flushes.
-    options_.manual_wal_flush = true;
+    options_.manual_wal_flush = false;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -257,24 +258,26 @@ Status RocksDBDatabasePlugin::setUp() {
     }
   }
 
-  // Start a background thread to flush WAL regularly.
-  flush_wal_thread_ = std::make_unique<std::thread>(
-    std::bind(&RocksDBDatabasePlugin::flushWal, this));
+  if (options_.manual_wal_flush) {
+    // Start a background thread to flush WAL on a schedule.
+    flush_wal_thread_ = std::make_unique<std::thread>(
+      std::bind(&RocksDBDatabasePlugin::flushWal, this));
+  }
 
   return Status(0);
 }
 
-// flushWal flushes the WAL every 30 seconds. This is performed instead of inline flushing to maintain performance at the expense of
+// flushWal flushes the WAL every xx seconds. This is performed instead of inline flushing to maintain performance at the expense of
 // data loss during the flush window. When osquery is shutdown, the close() method will perform a final WAL flush.
 void RocksDBDatabasePlugin::flushWal() {
   uint64_t flushes = 0;
   while(1) {
-    std::this_thread::sleep_for(std::chrono::seconds(30));
+    std::this_thread::sleep_for(std::chrono::seconds(FLAGS_rocksdb_wal_flush_period));
     if (closing_.load(std::memory_order_acquire)) {
       LOG(WARNING) << "flushWal closing ...";
       return;
     }
-    db_->FlushWAL(false);
+    db_->FlushWAL(false); // flush but no fsync 
     LOG(WARNING) << "Flushed WAL: " << ++flushes;
   }
 }
@@ -423,6 +426,12 @@ Status RocksDBDatabasePlugin::put(const std::string& domain,
 }
 
 inline bool skipWal(const std::string& domain) {
+  // We skip commits to the WAL for:
+  // - events: event publishing can be high-throughput particularly in a server-context and any WAL commit could impede performance.
+  // - logs: log publishing can be high-throughput particularly in a server-context and any WAL commit could impede performance.
+  // The impact of bypassing WAL commits is potential data loss during unclean process shutdowns (failure). Whilst this is not ideal, the potential
+  // to loose events/logs or not keep up with publishing rates could similarly lead to data loss or failure. As such publishing to
+  // high-throughput memtables is "best effort" in terms of durability across process failures.
   return (kEvents == domain) || (kLogs == domain);
 }
 
@@ -433,11 +442,12 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
     return Status(1, "Could not get column family for " + domain);
   }
 
-  // Events should be fast, and do not need to force syncs.
+  // Events and logs should be fast, and do not need to force syncs.
   auto options = rocksdb::WriteOptions();
   if (skipWal(domain)) {
     options.disableWAL = true;
   } else {
+    // Never fsync. Data loss should only be event due to hardware or OS failure and not process failure.
     options.sync = false;
   }
 
