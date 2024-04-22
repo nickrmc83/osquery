@@ -138,7 +138,7 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
     options_.max_log_file_size = 1024 * 1024 * 1; // 1MiB
-    options_.max_open_files = 256; // keep a lid on memory usage by restricting the number of SST files open and cached.
+    options_.max_open_files = 1024; // keep a lid on memory usage by restricting the number of SST files open and cached.
     options_.stats_dump_period_sec = 600; // dump stats every 10 minutes.
     options_.max_manifest_file_size = 1024 * 1024 * 64; // 64MiB
 
@@ -167,8 +167,6 @@ Status RocksDBDatabasePlugin::setUp() {
     // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
     // quicker.
     options_.paranoid_checks = false;
-    // atomic_flush enforces that all column families are flushed together atomically.
-    options_.atomic_flush = true;
     // avoid_unnecessary_blocking_io will stop rocksdb from performing expensive io operations in the context of a client
     // operation. io operations such as deleting files will instead be performed in a background thread.
     options_.avoid_unnecessary_blocking_io = true;
