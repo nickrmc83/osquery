@@ -222,6 +222,8 @@ Status RocksDBDatabasePlugin::setUp() {
   // Tests may trash calls to setUp, make sure subsequent calls do not leak.
   close();
 
+  closing_ = false;
+
   // Attempt to create a RocksDB instance and handles.
   auto s =
       rocksdb::DB::Open(options_, path_, column_families_, &handles_, &db_);
