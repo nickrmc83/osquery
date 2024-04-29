@@ -32,7 +32,7 @@ HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
 HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 10, "Background failure auto-recovery retry count");
-HIDDEN_FLAG(uint32, rocksdb_foreground_write_error_threshold, 10, "The number of foreground write errors that can be encountered before a shutdown is initiated");
+HIDDEN_FLAG(uint32, rocksdb_foreground_write_error_threshold, 0, "The number of foreground write errors that can be encountered before a shutdown is initiated");
 HIDDEN_FLAG(uint32, rocksdb_wal_flush_period, 60, "The number of seconds between WAL flushes.");
 
 DECLARE_string(database_path);
@@ -138,8 +138,7 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
     options_.max_log_file_size = 1024 * 1024 * 1; // 1MiB
-    options_.max_open_files = 1024; // keep a lid on memory usage by restricting the number of SST files open and cached.
-    options_.stats_dump_period_sec = 600; // dump stats every 10 minutes.
+    options_.max_open_files = 1024; // keep a lid on memory usage by restricting the number of files open and cached.
     options_.max_manifest_file_size = 1024 * 1024 * 64; // 64MiB
 
     // Performance and optimization settings.
@@ -166,12 +165,12 @@ Status RocksDBDatabasePlugin::setUp() {
     // paranoid_checks will cause rocksdb to enter read-only mode and signal to foreground request it has failed
     // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
     // quicker.
-    options_.paranoid_checks = false;
+    options_.paranoid_checks = FLAGS_rocksdb_foreground_write_error_threshold == 0 ? true : false;
     // avoid_unnecessary_blocking_io will stop rocksdb from performing expensive io operations in the context of a client
     // operation. io operations such as deleting files will instead be performed in a background thread.
     options_.avoid_unnecessary_blocking_io = true;
     // flush WAL on a schedule to maintain throughput at the expense of some potential data loss between flushes.
-    options_.manual_wal_flush = false;
+    options_.manual_wal_flush = FLAGS_rocksdb_wal_flush_period > 0 ? true : false;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -275,8 +274,13 @@ void RocksDBDatabasePlugin::flushWal() {
       LOG(WARNING) << "flushWal closing ...";
       return;
     }
-    db_->FlushWAL(false); // flush but no fsync 
-    LOG(WARNING) << "Flushed WAL: " << ++flushes;
+    auto s = db_->FlushWAL(false); // flush but no fsync
+    if (!s.ok()) {
+      LOG(ERROR) << "Flushed WAL error: " << s.ToString();
+      requestShutdown(EXIT_CATASTROPHIC, s.ToString());
+      return;
+    }
+    LOG(WARNING) << "Flushed WAL successfully: " << ++flushes;
   }
 }
 
