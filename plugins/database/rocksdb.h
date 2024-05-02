@@ -152,11 +152,6 @@ class RocksDBDatabasePlugin : public DatabasePlugin {
   /// Deconstruction mutex.
   Mutex close_mutex_;
 
-  std::atomic<bool> closing_;
-
-  /// WAL flush thread.
-  std::unique_ptr<std::thread> flush_wal_thread_;
-
  private:
   friend class GlogRocksDBLogger;
   FRIEND_TEST(RocksDBDatabasePluginTests, test_corruption);

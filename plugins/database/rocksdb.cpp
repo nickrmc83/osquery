@@ -31,9 +31,8 @@ HIDDEN_FLAG(int32, rocksdb_write_buffer, 16, "Max write buffer number");
 HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
-HIDDEN_FLAG(int32, rocksdb_max_bgerror_resume_count, 10, "Background failure auto-recovery retry count");
-HIDDEN_FLAG(uint32, rocksdb_foreground_write_error_threshold, 0, "The number of foreground write errors that can be encountered before a shutdown is initiated");
-HIDDEN_FLAG(uint32, rocksdb_wal_flush_period, 60, "The number of seconds between WAL flushes.");
+HIDDEN_FLAG(int32, rocksdb_max_open_files, 1024, "Maximum cached file handles rocksdb can keep open");
+HIDDEN_FLAG(bool, rocksdb_skip_wal, true, "Disable rocksdb write-ahead log");
 
 DECLARE_string(database_path);
 
@@ -44,11 +43,6 @@ DECLARE_string(database_path);
  * The two primary external systems are the RocksDB logger plugin and tests.
  */
 std::atomic<bool> kRocksDBCorruptionIndicator{false};
-
-/**
- * @brief Track foreground error count
-*/
-static std::atomic<size_t> kRocksDBForegroundErrorCount{0};
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
@@ -138,7 +132,7 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
     options_.max_log_file_size = 1024 * 1024 * 1; // 1MiB
-    options_.max_open_files = 1024; // keep a lid on memory usage by restricting the number of files open and cached.
+    options_.max_open_files = FLAGS_rocksdb_max_open_files; // keep a lid on memory usage by restricting the number of files open and cached.
     options_.max_manifest_file_size = 1024 * 1024 * 64; // 64MiB
 
     // Performance and optimization settings.
@@ -156,21 +150,11 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.max_background_compactions = 1;
     options_.env->SetBackgroundThreads(options_.max_background_flushes, rocksdb::Env::Priority::HIGH);
     options_.env->SetBackgroundThreads(options_.max_background_compactions, rocksdb::Env::Priority::LOW);
-    // Support background resume error handling. Whilst there's a background error, the DB may not accept new records.
-    // We choose this over immediate restart to reduce the number of events that may be lost.
-    options_.max_bgerror_resume_count = 
-        static_cast<int>(FLAGS_rocksdb_max_bgerror_resume_count);
     // We implement an event listener to subscribe to auto-recovery events for logging a signalling catastrophic failure.
     options_.listeners = std::vector<std::shared_ptr<rocksdb::EventListener>>{std::make_shared<EventHandler>()};
-    // paranoid_checks will cause rocksdb to enter read-only mode and signal to foreground request it has failed
-    // if it encounters issues during flushing, compaction, etc. This is desirable so that we fail quickly and restart
-    // quicker.
-    options_.paranoid_checks = FLAGS_rocksdb_foreground_write_error_threshold == 0 ? true : false;
     // avoid_unnecessary_blocking_io will stop rocksdb from performing expensive io operations in the context of a client
     // operation. io operations such as deleting files will instead be performed in a background thread.
     options_.avoid_unnecessary_blocking_io = true;
-    // flush WAL on a schedule to maintain throughput at the expense of some potential data loss between flushes.
-    options_.manual_wal_flush = FLAGS_rocksdb_wal_flush_period > 0 ? true : false;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -222,8 +206,6 @@ Status RocksDBDatabasePlugin::setUp() {
   // Tests may trash calls to setUp, make sure subsequent calls do not leak.
   close();
 
-  closing_ = false;
-
   // Attempt to create a RocksDB instance and handles.
   auto s =
       rocksdb::DB::Open(options_, path_, column_families_, &handles_, &db_);
@@ -257,33 +239,7 @@ Status RocksDBDatabasePlugin::setUp() {
     }
   }
 
-  if (options_.manual_wal_flush) {
-    // Start a background thread to flush WAL on a schedule.
-    flush_wal_thread_ = std::make_unique<std::thread>(
-      std::bind(&RocksDBDatabasePlugin::flushWal, this));
-  }
-
   return Status(0);
-}
-
-// flushWal flushes the WAL every xx seconds. This is performed instead of inline flushing to maintain performance at the expense of
-// data loss during the flush window. When osquery is shutdown, the close() method will perform a final WAL flush.
-void RocksDBDatabasePlugin::flushWal() {
-  uint64_t flushes = 0;
-  while(1) {
-    std::this_thread::sleep_for(std::chrono::seconds(FLAGS_rocksdb_wal_flush_period));
-    if (closing_.load(std::memory_order_acquire)) {
-      LOG(WARNING) << "flushWal closing ...";
-      return;
-    }
-    auto s = db_->FlushWAL(false); // flush but no fsync
-    if (!s.ok()) {
-      LOG(ERROR) << "Flushed WAL error: " << s.ToString();
-      requestShutdown(EXIT_CATASTROPHIC, s.ToString());
-      return;
-    }
-    LOG(WARNING) << "Flushed WAL successfully: " << ++flushes;
-  }
 }
 
 Status RocksDBDatabasePlugin::compactFiles(const std::string& domain) {
@@ -324,13 +280,6 @@ void RocksDBDatabasePlugin::tearDown() {
 
 void RocksDBDatabasePlugin::close() {
   WriteLock lock(close_mutex_);
-  closing_ = true;
-  
-  // Wait for background flushing thread to complete.
-  if (flush_wal_thread_.get()) {
-    flush_wal_thread_->join();
-    flush_wal_thread_.reset(nullptr);
-  }
 
   for (auto handle : handles_) {
     delete handle;
@@ -431,12 +380,13 @@ Status RocksDBDatabasePlugin::put(const std::string& domain,
 
 inline bool skipWal(const std::string& domain) {
   // We skip commits to the WAL for:
+  // - if FLAGS_rocksdb_skip_wal is true: no WAL writes will occur for any column family.
   // - events: event publishing can be high-throughput particularly in a server-context and any WAL commit could impede performance.
   // - logs: log publishing can be high-throughput particularly in a server-context and any WAL commit could impede performance.
   // The impact of bypassing WAL commits is potential data loss during unclean process shutdowns (failure). Whilst this is not ideal, the potential
   // to loose events/logs or not keep up with publishing rates could similarly lead to data loss or failure. As such publishing to
   // high-throughput memtables is "best effort" in terms of durability across process failures.
-  return (kEvents == domain) || (kLogs == domain);
+  return FLAGS_rocksdb_skip_wal || (kEvents == domain) || (kLogs == domain);
 }
 
 Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
@@ -487,20 +437,9 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
     }
   }
 
-  // If the error is a foreground error, increment a counter which we can use to terminate ourselves above a threshold.
-  auto foreground_errors = (s.severity() == rocksdb::Status::Severity::kNoError) ? 
-                           ++kRocksDBForegroundErrorCount :
-                           kRocksDBForegroundErrorCount.load();
-
   switch (s.severity()) {
     case rocksdb::Status::Severity::kNoError:
-      LOG(WARNING) << "Foreground error encountered during putBatch: "
-                 << foreground_errors << " foreground failures, " << error_string;
-      if (foreground_errors == FLAGS_rocksdb_foreground_write_error_threshold) {
-        LOG(ERROR) << "Too many foreground write errors, signalling shutdown: " 
-                   << foreground_errors << " foreground failures, " << error_string;
-        requestShutdown(EXIT_CATASTROPHIC, error_string);
-      }
+      LOG(WARNING) << "Foreground error encountered during putBatch: " << error_string;
       return Status(s.code(), error_string);
     case rocksdb::Status::Severity::kSoftError:
       LOG(WARNING) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
