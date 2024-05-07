@@ -12,6 +12,7 @@
 #include <rocksdb/db.h>
 #include <rocksdb/env.h>
 #include <rocksdb/options.h>
+#include <rocksdb/table.h>
 
 #include <osquery/core/flags.h>
 #include <osquery/core/shutdown.h>
@@ -32,6 +33,7 @@ HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
 HIDDEN_FLAG(int32, rocksdb_max_open_files, 1024, "Maximum cached file handles rocksdb can keep open");
+HIDDEN_FLAG(int32, rocksdb_block_cache_size, 64, "Block cache in MiB");
 HIDDEN_FLAG(bool, rocksdb_skip_wal, true, "Disable rocksdb write-ahead log");
 
 DECLARE_string(database_path);
@@ -125,6 +127,16 @@ Status RocksDBDatabasePlugin::setUp() {
   if (!initialized_) {
     initialized_ = true;
 
+    // We configure the block cache used by rocksdb to 64MiB up from the default 8MiB to improve read performance.
+    // There should be an improvement in terms of speed and IO as more results can be returned from memory directly.
+    // The trade-off is greater memory usage.
+    auto cache = rocksdb::NewLRUCache(FLAGS_rocksdb_block_cache_size * 1024 * 1026); // default 64MiB
+    rocksdb::BlockBasedTableOptions bbt_opts;
+    bbt_opts.index_type = rocksdb::BlockBasedTableOptions::IndexType::kTwoLevelIndexSearch; 
+    bbt_opts.block_cache = cache;
+    bbt_opts.cache_index_and_filter_blocks = true;
+    options_.table_factory.reset(rocksdb::NewBlockBasedTableFactory(bbt_opts));
+
     // Set meta-data (mostly) handling options.
     options_.create_if_missing = true;
     options_.create_missing_column_families = true;
@@ -133,14 +145,14 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.keep_log_file_num = 10;
     options_.max_log_file_size = 1024 * 1024 * 1; // 1MiB
     options_.max_open_files = FLAGS_rocksdb_max_open_files; // keep a lid on memory usage by restricting the number of files open and cached.
-    options_.max_manifest_file_size = 1024 * 1024 * 64; // 64MiB
+    options_.max_manifest_file_size = 1024 * 1024 * 16; // 16MiB
 
     // Performance and optimization settings.
     // Use rocksdb::kZSTD to use ZSTD database compression
     options_.compression = rocksdb::kNoCompression;
     options_.compaction_style = rocksdb::kCompactionStyleLevel;
-    options_.arena_block_size = (4 * 1024);
-    options_.write_buffer_size = (4 * 1024) * FLAGS_rocksdb_buffer_blocks;
+    options_.arena_block_size = (4 * 1024); // 4KiB
+    options_.write_buffer_size = (4 * 1024) * FLAGS_rocksdb_buffer_blocks; // default 1MiB e.g. when FLAGS_rocksdb_buffer_blocks == 256
     options_.max_write_buffer_number =
         static_cast<int>(FLAGS_rocksdb_write_buffer);
     options_.min_write_buffer_number_to_merge =
