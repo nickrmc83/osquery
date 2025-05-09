@@ -24,7 +24,7 @@
 	url = https://github.com/Tencent/rapidjson
 [submodule "libraries/cmake/source/rocksdb/src"]
 	path = libraries/cmake/source/rocksdb/src
-	url = https://github.com/facebook/rocksdb
+	url = https://github.com/nickrmc83/rocksdb
 [submodule "libraries/cmake/source/sleuthkit/src"]
 	path = libraries/cmake/source/sleuthkit/src
 	url = https://github.com/sleuthkit/sleuthkit

@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include <thread>
 
 #include <rocksdb/db.h>
 
@@ -114,6 +115,9 @@ class RocksDBDatabasePlugin : public DatabasePlugin {
 
   /// Flush memtables and trigger compaction.
   void flush();
+
+  /// Flush wal.
+  void flushWal();
 
  private:
   /**

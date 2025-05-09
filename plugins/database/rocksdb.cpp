@@ -6,14 +6,16 @@
  *
  * SPDX-License-Identifier: (Apache-2.0 OR GPL-2.0-only)
  */
-
 #include <sys/stat.h>
+#include <sstream>
 
 #include <rocksdb/db.h>
 #include <rocksdb/env.h>
 #include <rocksdb/options.h>
+#include <rocksdb/table.h>
 
 #include <osquery/core/flags.h>
+#include <osquery/core/shutdown.h>
 #include <osquery/filesystem/fileops.h>
 #include <osquery/filesystem/filesystem.h>
 #include <osquery/logger/logger.h>
@@ -30,6 +32,9 @@ HIDDEN_FLAG(int32, rocksdb_write_buffer, 16, "Max write buffer number");
 HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
 HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
 HIDDEN_FLAG(int32, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
+HIDDEN_FLAG(int32, rocksdb_max_open_files, 1024, "Maximum cached file handles rocksdb can keep open");
+HIDDEN_FLAG(int32, rocksdb_block_cache_size, 64, "Block cache in MiB");
+HIDDEN_FLAG(bool, rocksdb_skip_wal, true, "Disable rocksdb write-ahead log");
 
 DECLARE_string(database_path);
 
@@ -73,6 +78,35 @@ void GlogRocksDBLogger::Logv(const char* format, va_list ap) {
   }
 }
 
+// EventHandler listens for various rocksdb events and log them.
+class EventHandler : public rocksdb::EventListener {
+  public:
+    // OnErrorRecoveryBegin is called wh en rocksdb encounters an error.
+    void OnErrorRecoveryBegin(rocksdb::BackgroundErrorReason reason,
+                              rocksdb::Status status,
+                              bool* auto_recovery) override {                       
+      LOG(WARNING) << "rocksdb auto recovery begins: " 
+                   << static_cast<uint>(reason)
+                   << " " << status.ToString()
+                   << " code: " << status.code()
+                   << "/" << status.subcode()
+                   << "/" << status.severity()
+                   << ", auto_recovery " << (*auto_recovery ? "true" : "false");
+    }
+
+    // OnErrorRecoveryEnd is called when rocksdb completes error recovery.
+    void OnErrorRecoveryEnd(const rocksdb::BackgroundErrorRecoveryInfo& info) override {
+      LOG(ERROR) << "rocksdb auto recovery ends: old error: " << info.old_bg_error.ToString()
+                 << ", new error: " << info.new_bg_error.ToString();
+;
+      if (!info.new_bg_error.ok()) {
+        LOG(ERROR) << "Signalling catastrophic error after error recovery failure: " 
+                   << info.new_bg_error.ToString();
+        requestShutdown(EXIT_CATASTROPHIC, info.new_bg_error.ToString());
+      }
+    }
+};
+
 Status RocksDBDatabasePlugin::setUp() {
   if (!allowOpen()) {
     LOG(WARNING) << RLOG(1629) << "Not allowed to set up database plugin";
@@ -93,29 +127,46 @@ Status RocksDBDatabasePlugin::setUp() {
   if (!initialized_) {
     initialized_ = true;
 
+    // We configure the block cache used by rocksdb to 64MiB up from the default 8MiB to improve read performance.
+    // There should be an improvement in terms of speed and IO as more results can be returned from memory directly.
+    // The trade-off is greater memory usage.
+    auto cache = rocksdb::NewLRUCache(FLAGS_rocksdb_block_cache_size * 1024 * 1026); // default 64MiB
+    rocksdb::BlockBasedTableOptions bbt_opts;
+    bbt_opts.index_type = rocksdb::BlockBasedTableOptions::IndexType::kTwoLevelIndexSearch; 
+    bbt_opts.block_cache = cache;
+    bbt_opts.cache_index_and_filter_blocks = true;
+    options_.table_factory.reset(rocksdb::NewBlockBasedTableFactory(bbt_opts));
+
     // Set meta-data (mostly) handling options.
     options_.create_if_missing = true;
     options_.create_missing_column_families = true;
-    options_.info_log_level = rocksdb::ERROR_LEVEL;
+    options_.info_log_level = rocksdb::WARN_LEVEL;
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
-    options_.max_log_file_size = 1024 * 1024 * 1;
-    options_.max_open_files = 128;
-    options_.stats_dump_period_sec = 0;
-    options_.max_manifest_file_size = 1024 * 500;
+    options_.max_log_file_size = 1024 * 1024 * 1; // 1MiB
+    options_.max_open_files = FLAGS_rocksdb_max_open_files; // keep a lid on memory usage by restricting the number of files open and cached.
+    options_.max_manifest_file_size = 1024 * 1024 * 16; // 16MiB
 
     // Performance and optimization settings.
     // Use rocksdb::kZSTD to use ZSTD database compression
     options_.compression = rocksdb::kNoCompression;
     options_.compaction_style = rocksdb::kCompactionStyleLevel;
-    options_.arena_block_size = (4 * 1024);
-    options_.write_buffer_size = (4 * 1024) * FLAGS_rocksdb_buffer_blocks;
+    options_.arena_block_size = (4 * 1024); // 4KiB
+    options_.write_buffer_size = (4 * 1024) * FLAGS_rocksdb_buffer_blocks; // default 1MiB e.g. when FLAGS_rocksdb_buffer_blocks == 256
     options_.max_write_buffer_number =
         static_cast<int>(FLAGS_rocksdb_write_buffer);
     options_.min_write_buffer_number_to_merge =
         static_cast<int>(FLAGS_rocksdb_merge_number);
     options_.max_background_flushes =
         static_cast<int>(FLAGS_rocksdb_background_flushes);
+    options_.max_background_compactions = 1;
+    options_.env->SetBackgroundThreads(options_.max_background_flushes, rocksdb::Env::Priority::HIGH);
+    options_.env->SetBackgroundThreads(options_.max_background_compactions, rocksdb::Env::Priority::LOW);
+    // We implement an event listener to subscribe to auto-recovery events for logging a signalling catastrophic failure.
+    options_.listeners = std::vector<std::shared_ptr<rocksdb::EventListener>>{std::make_shared<EventHandler>()};
+    // avoid_unnecessary_blocking_io will stop rocksdb from performing expensive io operations in the context of a client
+    // operation. io operations such as deleting files will instead be performed in a background thread.
+    options_.avoid_unnecessary_blocking_io = true;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -241,12 +292,14 @@ void RocksDBDatabasePlugin::tearDown() {
 
 void RocksDBDatabasePlugin::close() {
   WriteLock lock(close_mutex_);
+
   for (auto handle : handles_) {
     delete handle;
   }
   handles_.clear();
 
   if (db_ != nullptr) {
+    db_->FlushWAL(true);
     delete db_;
     db_ = nullptr;
   }
@@ -338,7 +391,14 @@ Status RocksDBDatabasePlugin::put(const std::string& domain,
 }
 
 inline bool skipWal(const std::string& domain) {
-  return (kEvents == domain);
+  // We skip commits to the WAL for:
+  // - if FLAGS_rocksdb_skip_wal is true: no WAL writes will occur for any column family.
+  // - events: event publishing can be high-throughput particularly in a server-context and any WAL commit could impede performance.
+  // - logs: log publishing can be high-throughput particularly in a server-context and any WAL commit could impede performance.
+  // The impact of bypassing WAL commits is potential data loss during unclean process shutdowns (failure). Whilst this is not ideal, the potential
+  // to loose events/logs or not keep up with publishing rates could similarly lead to data loss or failure. As such publishing to
+  // high-throughput memtables is "best effort" in terms of durability across process failures.
+  return FLAGS_rocksdb_skip_wal || (kEvents == domain) || (kLogs == domain);
 }
 
 Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
@@ -348,11 +408,12 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
     return Status(1, "Could not get column family for " + domain);
   }
 
-  // Events should be fast, and do not need to force syncs.
+  // Events and logs should be fast, and do not need to force syncs.
   auto options = rocksdb::WriteOptions();
   if (skipWal(domain)) {
     options.disableWAL = true;
   } else {
+    // Never fsync. Data loss should only be event due to hardware or OS failure and not process failure.
     options.sync = false;
   }
 
@@ -365,17 +426,44 @@ Status RocksDBDatabasePlugin::putBatch(const std::string& domain,
   }
 
   auto s = getDB()->Write(options, &batch);
-  if (s.code() != 0 && s.IsIOError()) {
+  if (s.ok()) {
+    return Status(Status::kSuccessCode, s.ToString());
+  }
+
+  // Soft and hard errors indicate temporary degredation of the DB. During this time writes are not guaranteed to succeed.
+  // We choose to drop events during this period instead of restarting the daemon. This hopefully reduces the total number of
+  // dropped events which would occur with a restart.
+  std::stringstream error_builder;
+  error_builder << s.ToString()
+                << " - domain " << domain
+                << " - code/sub-code/severity " << s.code()
+                << "/" << s.subcode()
+                << "/" << s.severity();
+  auto error_string = error_builder.str();
+  if (s.IsIOError()) {
     // An error occurred, check if it is an IO error and remove the offending
     // specific filename or log name.
-    std::string error_string = s.ToString();
     size_t error_pos = error_string.find_last_of(":");
     if (error_pos != std::string::npos) {
-      return Status(s.code(), "IOError: " + error_string.substr(error_pos + 2));
+      error_string = error_string.substr(error_pos + 2);
     }
   }
 
-  return Status(s.code(), s.ToString());
+  switch (s.severity()) {
+    case rocksdb::Status::Severity::kNoError:
+      LOG(WARNING) << "Foreground error encountered during putBatch: " << error_string;
+      return Status(s.code(), error_string);
+    case rocksdb::Status::Severity::kSoftError:
+      LOG(WARNING) << "Soft error encountered during putBatch, write to memtable success but may not be persisted: " << error_string;
+      return Status(Status::kSuccessCode, error_string);
+    case rocksdb::Status::Severity::kHardError:
+      LOG(ERROR) << "Hard error encountered during putBatch, continuing optimistically but this data is lost: " << error_string;
+      return Status(s.code(), error_string);
+    default:
+      LOG(ERROR) << "Terminal error encountered during putBatch: " << error_string;
+      requestShutdown(EXIT_CATASTROPHIC, error_string);
+      return Status(s.code(), error_string);
+  }
 }
 
 Status RocksDBDatabasePlugin::put(const std::string& domain,
@@ -399,6 +487,7 @@ Status RocksDBDatabasePlugin::remove(const std::string& domain,
   } else {
     options.sync = false;
   }
+  // TODO: handle background errors here
   auto s = getDB()->Delete(options, cfh, key);
   return Status(s.code(), s.ToString());
 }
@@ -425,6 +514,7 @@ Status RocksDBDatabasePlugin::removeRange(const std::string& domain,
   } else {
     options.sync = false;
   }
+  // TODO: handle background errors here
   auto s = getDB()->DeleteRange(options, cfh, low, high);
   if (low <= high) {
     s = getDB()->Delete(options, cfh, high);
