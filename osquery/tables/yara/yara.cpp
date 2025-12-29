@@ -280,7 +280,7 @@ Status getYaraRules(YARAConfigParser parser,
       // rule_string will be empty if there is partial fetch or
       // the function failed to fetch the YARA rules from URL
       if (rule_string.empty()) {
-        LOG(WARNING) << "Failed to get YARA rule url : " << sign << " empty rule string";
+        LOG(WARNING) << "Failed to get YARA rule url: " << sign << " empty rule string";
         continue;
       }
 
