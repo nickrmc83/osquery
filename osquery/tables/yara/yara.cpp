@@ -51,6 +51,7 @@ FLAG(uint32,
      50,
      "Time in ms to sleep after scan of each file (default 50) to reduce "
      "memory spikes");
+
 FLAG(int32,
      yara_timeout,
      0,
