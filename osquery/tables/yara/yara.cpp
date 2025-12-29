@@ -205,8 +205,17 @@ void doYARAScan(YR_RULES* rules,
   // Perform the scan, using the static YARA subscriber callback.
   int result = yr_rules_scan_file(
       rules, path.c_str(), SCAN_FLAGS_FAST_MODE, YARACallback, (void*)&row, timeout);
-  if (result == ERROR_SUCCESS) {
-    results.push_back(std::move(row));
+  
+  switch (result) {
+    case ERROR_SUCCESS:
+      results.push_back(std::move(row));
+      break;
+    case ERROR_SCAN_TIMEOUT:
+      LOG(WARNING) << "YARA scan timeout on file " << path;
+      break;
+    default:
+      VLOG(1) << "YARA scan error on file " << path << ": " << result;
+      break;
   }
 }
 
