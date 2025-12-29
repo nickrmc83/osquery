@@ -51,6 +51,11 @@ FLAG(uint32,
      50,
      "Time in ms to sleep after scan of each file (default 50) to reduce "
      "memory spikes");
+FLAG(int32,
+     yara_timeout,
+     0,
+     "The maximum time in seconds that a yara scan is afforded before aborting (default 0). "
+     "A value of 0 means no timeout is enforced.");
 
 HIDDEN_FLAG(bool,
             enable_yara_string,
@@ -143,10 +148,11 @@ Status getRuleFromURL(const std::string& url, std::string& rule) {
     if (response.status() == 200) {
       rule = response.body();
     } else {
-      VLOG(1) << "Can't fetch rules from url response code: "
-              << response.status();
+      VLOG(1) << "Can't fetch rules from url response code: " << response.status();
+      return Status::failure("YARA HTTP status: " + std::to_string(response.status()));
     }
   } catch (const std::exception& e) {
+    VLOG(1) << "Failed to get YARA rule url exception: " << e.what();
     return Status::failure(e.what());
   }
 
@@ -158,6 +164,7 @@ void doYARAScan(YR_RULES* rules,
                 QueryData& results,
                 YaraRuleType yr_type,
                 const std::string& sigfile) {
+
   Row row;
 
   // These are default values, to be updated in YARACallback.
@@ -193,7 +200,7 @@ void doYARAScan(YR_RULES* rules,
 
   // Perform the scan, using the static YARA subscriber callback.
   int result = yr_rules_scan_file(
-      rules, path.c_str(), SCAN_FLAGS_FAST_MODE, YARACallback, (void*)&row, 0);
+      rules, path.c_str(), SCAN_FLAGS_FAST_MODE, YARACallback, (void*)&row, FLAGS_yara_timeout);
   if (result == ERROR_SUCCESS) {
     results.push_back(std::move(row));
   }
@@ -250,10 +257,15 @@ Status getYaraRules(YARAConfigParser parser,
     case YC_URL: {
       std::string rule_string;
       auto request = getRuleFromURL(sign, rule_string);
+      if (!request.ok()) {
+        LOG(WARNING) << "Failed to get YARA rule url: " << sign << " " << request.toString();
+        continue;
+      }
+
       // rule_string will be empty if there is partial fetch or
       // the function failed to fetch the YARA rules from URL
-      if (!request.ok() || rule_string.empty()) {
-        LOG(WARNING) << "Failed to get YARA rule url: " << sign;
+      if (rule_string.empty()) {
+        LOG(WARNING) << "Failed to get YARA rule url : " << sign << " empty rule string";
         continue;
       }
 
