@@ -213,7 +213,7 @@ void doYARAScan(YR_RULES* rules,
       results.push_back(std::move(row));
       break;
     case ERROR_SCAN_TIMEOUT:
-      LOG(WARNING) << "YARA scan timeout on file " << path << " using signature file" << sigfile;
+      LOG(WARNING) << "YARA scan timeout on file " << path << " using signature file " << sigfile;
       break;
     default:
       VLOG(1) << "YARA scan error on file " << path << ": " << result;
