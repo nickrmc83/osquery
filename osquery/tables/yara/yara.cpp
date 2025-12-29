@@ -56,7 +56,7 @@ FLAG(int32,
      yara_timeout,
      0,
      "The maximum time in seconds that a yara scan is afforded before aborting (default 0). "
-     "A value of 0 means no timeout is enforced.");
+     "A value of 0 or less means no timeout is enforced.");
 
 HIDDEN_FLAG(bool,
             enable_yara_string,
@@ -199,9 +199,12 @@ void doYARAScan(YR_RULES* rules,
     break;
   }
 
+  // Sanitize timeout flag so any negative value is treated as no timeout.
+  int timeout = std::max(0, FLAGS_yara_timeout);
+
   // Perform the scan, using the static YARA subscriber callback.
   int result = yr_rules_scan_file(
-      rules, path.c_str(), SCAN_FLAGS_FAST_MODE, YARACallback, (void*)&row, FLAGS_yara_timeout);
+      rules, path.c_str(), SCAN_FLAGS_FAST_MODE, YARACallback, (void*)&row, timeout);
   if (result == ERROR_SUCCESS) {
     results.push_back(std::move(row));
   }
