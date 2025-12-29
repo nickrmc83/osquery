@@ -52,6 +52,8 @@ FLAG(uint32,
      "Time in ms to sleep after scan of each file (default 50) to reduce "
      "memory spikes");
 
+// TODO: in a future major version, set the default value to a sane default to prevent yara
+// scans blocking other processing until the process is restarted. A sane value might be 300 seconds/5 minutes.
 FLAG(int32,
      yara_timeout,
      0,
